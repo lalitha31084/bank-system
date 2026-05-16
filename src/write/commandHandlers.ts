@@ -1,16 +1,13 @@
-import { appendEvent } from "./eventStore";
+import { appendEvent, loadAggregate } from "./eventStore";
 import { pool } from "../common/db";
 
 export async function createAccount(cmd: any): Promise<void> {
 
   const { accountId, ownerName, initialBalance, currency } = cmd;
 
-  const existing = await pool.query(
-    "SELECT 1 FROM events WHERE aggregate_id=$1 LIMIT 1",
-    [accountId]
-  );
+  const { state } = await loadAggregate(accountId);
 
-  if (existing.rowCount && existing.rowCount > 0) {
+  if (state) {
     throw new Error("Account already exists");
   }
 
@@ -19,7 +16,7 @@ export async function createAccount(cmd: any): Promise<void> {
     ownerName,
     initialBalance,
     currency
-  });
+  }, 0);
 }
 
 export async function deposit(accountId: string, cmd: any): Promise<void> {
@@ -28,41 +25,53 @@ export async function deposit(accountId: string, cmd: any): Promise<void> {
     throw new Error("Invalid amount");
   }
 
-  await appendEvent(accountId, "MoneyDeposited", cmd);
+  const { state, version } = await loadAggregate(accountId);
+
+  if (!state) {
+    throw new Error("Account not found");
+  }
+
+  if (state.status === 'CLOSED') {
+    throw new Error("Account is closed");
+  }
+
+  await appendEvent(accountId, "MoneyDeposited", cmd, version);
 }
 
 export async function withdraw(accountId: string, cmd: any): Promise<void> {
 
-  const res = await pool.query(
-    "SELECT balance,status FROM account_summaries WHERE account_id=$1",
-    [accountId]
-  );
+  const { state, version } = await loadAggregate(accountId);
 
-  if (res.rowCount === 0) {
+  if (!state) {
     throw new Error("Account not found");
   }
 
-  if (Number(res.rows[0].balance) < cmd.amount) {
+  if (state.status === 'CLOSED') {
+    throw new Error("Account is closed");
+  }
+
+  if (state.balance < cmd.amount) {
     throw new Error("Insufficient funds");
   }
 
-  await appendEvent(accountId, "MoneyWithdrawn", cmd);
+  await appendEvent(accountId, "MoneyWithdrawn", cmd, version);
 }
 
 export async function closeAccount(accountId: string): Promise<void> {
 
-  const res = await pool.query(
-    "SELECT balance FROM account_summaries WHERE account_id=$1",
-    [accountId]
-  );
+  const { state, version } = await loadAggregate(accountId);
 
-  if (res.rowCount === 0) {
+  if (!state) {
     throw new Error("Account not found");
   }
 
-  if (Number(res.rows[0].balance) !== 0) {
+  if (state.balance !== 0) {
     throw new Error("Balance must be zero");
   }
 
-  await appendEvent(accountId, "AccountClosed", {});
+  if (state.status === 'CLOSED') {
+    throw new Error("Account is already closed");
+  }
+
+  await appendEvent(accountId, "AccountClosed", {}, version);
 }
